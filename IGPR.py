@@ -53,17 +53,18 @@ class IGPR(object):
         igpr.learn(x[i], y[i])
         ypredict, ycov = igpr.predict(x[i+1])
     """
-    def __init__(self, hyperparam_len=1., hyperparam_theta_f=1., alpha=1e-6, update_mode="FIFO",\
-                 optimize=False, k_matrix_adjust = False):
+    def __init__(self, target_counts = 1, hyperparam_len=1., hyperparam_theta_f=1., alpha=1e-6,\
+                update_mode="FIFO", max_k_matrix_size=20, optimize=False, k_matrix_adjust = False):
         self.hyperparam = HyperParam(hyperparam_theta_f, hyperparam_len)
         self.alpha = alpha
+        self.target_counts = target_counts
         self.update_mode = update_mode # "max_delta" or "FIFO"
         self.optimize = optimize
         self.optimize_count = 1
         self.k_matrix_adjust = k_matrix_adjust
         self.k_matrix_adjust_count = 100
         self.reset_count = self.optimize_count * self.k_matrix_adjust_count
-        self.max_k_matrix_size = 20
+        self.max_k_matrix_size = max_k_matrix_size
         self.lamda = 1
         self.count = 0
         self.is_av = False
@@ -99,7 +100,6 @@ class IGPR(object):
             self.feature_counts = len(new_x) if (np.array(new_x).ndim == 1) else len(new_x[0])
             self.kernel_x = np.empty((0, self.feature_counts))
             self.kernel_x = np.vstack((self.kernel_x, new_x))
-            self.target_counts = 1
             self.kernel_y = np.empty((0, self.target_counts))
             self.kernel_y = np.vstack((self.kernel_y, new_y))
             self.k_matrix = np.ones((1, 1)) + self.alpha
@@ -158,7 +158,7 @@ class IGPR(object):
         for i in range(temp.shape[0]):
             self.delta.append(temp[i])
     
-    def update_SE_kernel_hyperparam(self, new_theta_f, new_len, op=1):
+    def update_SE_kernel_hyperparam(self, new_theta_f, new_len, op=0):
         if op == 0:
             self.hyperparam = HyperParam(new_theta_f, new_len)
             self.calculate_SE_kernel()
@@ -177,16 +177,19 @@ class IGPR(object):
     
     def hyperparam_optimization(self):
         # optimization needs K_inv for different hyperparam, which makes igpr no sense if optimize for each step.
-        print("optimize here")
+        # print("optimize here")
         def negative_log_likelihood_loss(params):
-            self.update_SE_kernel_hyperparam(params[0], params[1], 0)
+            new_k_matrix = np.exp(-.5 * cdist(self.kernel_x / params[1], self.kernel_x / params[1],
+                          metric='sqeuclidean')).T * params[0] ** 2 + self.alpha * np.eye(len(self.kernel_x))
+            new_inv_k_matrix = np.linalg.inv(new_k_matrix)
             ky = self.kernel_y.flatten()
-            return (0.5 * ky.dot(self.inv_k_matrix).dot(ky) + 0.5 * np.linalg.slogdet(self.k_matrix)[1] + 0.5 * len(self.kernel_x) * np.log(2 * np.pi))
-        print ("neg_log_llh_l_before=", negative_log_likelihood_loss(np.array([self.hyperparam.theta_f, self.hyperparam.len])))
+            nllll = (0.5 * np.matmul(np.matmul(ky, new_inv_k_matrix), ky) + 0.5 * np.linalg.slogdet(new_k_matrix)[1] + 0.5 * len(self.kernel_x) * np.log(2 * np.pi))
+            return nllll
+        # print ("neg_log_llh_l_before=", negative_log_likelihood_loss(np.array([self.hyperparam.theta_f, self.hyperparam.len])))
         res = minimize(negative_log_likelihood_loss, np.array([self.hyperparam.theta_f, self.hyperparam.len]), bounds=((1e-3, 1e3), (1e-2, 1e2)), method='L-BFGS-B')
-        self.hyperparam = HyperParam(res.x[0], res.x[1])
-        print ("neg_log_llh_l_after=", negative_log_likelihood_loss(np.array([self.hyperparam.theta_f, self.hyperparam.len])))
-        print ("theta_f=", self.hyperparam.theta_f, "len=", self.hyperparam.len)
+        self.update_SE_kernel_hyperparam(res.x[0], res.x[1], 0)
+        # print ("neg_log_llh_l_after=", negative_log_likelihood_loss(np.array([self.hyperparam.theta_f, self.hyperparam.len])))
+        # print ("theta_f=", self.hyperparam.theta_f, "len=", self.hyperparam.len)
 
     """
     coming_x: array-like of shape (n_samples, n_features)
@@ -204,11 +207,12 @@ class IGPR(object):
             # calculate cross kernel
             cross_kernel_k = np.exp(-.5 * cdist(self.kernel_x / self.hyperparam.len, coming_x / self.hyperparam.len,
                           metric='sqeuclidean')).T * self.hyperparam.theta_f ** 2
-            prediction = cross_kernel_k.dot(self.inv_k_matrix.dot(self.kernel_y))
+            prediction = np.matmul(cross_kernel_k, np.matmul(self.inv_k_matrix, self.kernel_y))
 
             if return_cov:
                 kyy = self.hyperparam.theta_f * self.hyperparam.theta_f
-                variance = cross_kernel_k.dot(self.inv_k_matrix).dot(cross_kernel_k.T)
+                # variance = cross_kernel_k.dot(self.inv_k_matrix).dot(cross_kernel_k.T)
+                variance = np.matmul(np.matmul(cross_kernel_k, self.inv_k_matrix), cross_kernel_k.T)
                 variance = kyy - np.diag(variance).reshape(data_size,1)
                 return prediction, variance
             else:
